@@ -6,15 +6,13 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
                             QGraphicsRectItem, QInputDialog, QToolBar, 
                             QAction, QMessageBox, QCheckBox, QListWidget)
 from PyQt5.QtGui import QPixmap, QPainter, QPen, QColor, QImage, QTransform
-from PyQt5.QtCore import Qt, QRectF, QPointF, QSizeF, pyqtSignal, QObject
+from PyQt5.QtCore import Qt, QRectF, QPointF, QSizeF, pyqtSignal, QObject, QDateTime
 
-
-
-#Sync操作
 class SyncedGraphicsView(QGraphicsView):
     """同步的图形视图，可与其他视图同步操作"""
     transformChanged = pyqtSignal(QTransform)
     scrollBarChanged = pyqtSignal(str, int)  # 方向, 值
+    annotationAdded = pyqtSignal(str)  # 新增：标注添加信号，参数为标注文本
     
     def __init__(self, scene, parent=None):
         super().__init__(scene, parent)
@@ -70,7 +68,7 @@ class SyncedGraphicsView(QGraphicsView):
         self.is_syncing = False
         
     def syncScrollBar(self, orientation, value):
-        #同步滚动条位置  确保滚动条位置百分比相同即可，滚轮缩放引发的不同会被这条操作修正
+        """同步滚动条位置"""
         self.is_syncing = True
         if orientation == "horizontal":
             # 获取目标百分比位置
@@ -135,6 +133,9 @@ class SyncedGraphicsView(QGraphicsView):
                     text_item.setPos(rect.topLeft())
                     text_item.setDefaultTextColor(Qt.red)
                     self.annotations.append((self.current_annotation, text_item))
+                    
+                    # 发出标注添加信号
+                    self.annotationAdded.emit(text)
                 else:
                     self.scene().removeItem(self.current_annotation)
             else:
@@ -156,6 +157,7 @@ class ImageComparisonTool(QMainWindow):
         # 数据
         self.original_folder = ""
         self.translated_folder = ""
+        self.annotation_folder = ""  # 新增：标注文件夹路径
         self.image_pairs = []  # 存储图像对的列表，每个元素是(原始图像路径,翻译图像路径)
         self.current_index = -1
         self.modified_images = set()
@@ -166,7 +168,7 @@ class ImageComparisonTool(QMainWindow):
         # 添加调试信息
         print("程序已启动")
         print(f"用户登录名: Juggernautsst")
-        print(f"当前日期时间: 2025-06-01 07:37:40 (UTC)")
+        print(f"当前日期时间: {QDateTime.currentDateTimeUtc().toString('yyyy-MM-dd HH:mm:ss')}")
         
     def setup_ui(self):
         """设置用户界面"""
@@ -184,6 +186,11 @@ class ImageComparisonTool(QMainWindow):
         select_folders_btn = QPushButton("选择图像文件夹")
         select_folders_btn.clicked.connect(self.select_image_folders)
         left_layout.addWidget(select_folders_btn)
+        
+        # 标注文件夹选择按钮
+        select_annotation_folder_btn = QPushButton("选择标注保存文件夹")
+        select_annotation_folder_btn.clicked.connect(self.select_annotation_folder)
+        left_layout.addWidget(select_annotation_folder_btn)
         
         # 图像列表
         self.image_list = QListWidget()
@@ -243,6 +250,11 @@ class ImageComparisonTool(QMainWindow):
         reset_view_btn.clicked.connect(self.reset_views)
         toolbar_layout.addWidget(reset_view_btn)
         
+        # 手动保存当前标注按钮
+        save_annotation_btn = QPushButton("保存当前标注")
+        save_annotation_btn.clicked.connect(self.save_current_annotation)
+        toolbar_layout.addWidget(save_annotation_btn)
+        
         # 添加工具栏到布局
         right_layout.addLayout(toolbar_layout)
         
@@ -275,6 +287,10 @@ class ImageComparisonTool(QMainWindow):
         self.original_view.scrollBarChanged.connect(self.translated_view.syncScrollBar)
         self.translated_view.scrollBarChanged.connect(self.original_view.syncScrollBar)
         
+        # 连接标注添加信号
+        self.original_view.annotationAdded.connect(self.on_annotation_added)
+        self.translated_view.annotationAdded.connect(self.on_annotation_added)
+        
         right_layout.addWidget(image_splitter)
         
         # 状态栏
@@ -286,7 +302,82 @@ class ImageComparisonTool(QMainWindow):
         
         # 初始禁用导航按钮
         self.update_navigation()
+    
+    def select_annotation_folder(self):
+        """选择标注文件保存文件夹"""
+        folder = QFileDialog.getExistingDirectory(self, "选择标注保存文件夹", "")
+        if folder:
+            self.annotation_folder = folder
+            self.status_label.setText(f"标注将保存到: {folder}")
+            print(f"已选择标注保存文件夹: {folder}")
+    
+    def on_annotation_added(self, annotation_text):
+        """当添加标注时自动保存图像"""
+        self.save_current_annotation(annotation_text)
+    
+    def save_current_annotation(self, annotation_text=None):
+        """保存当前带标注的图像"""
+        if self.current_index < 0 or self.current_index >= len(self.image_pairs):
+            QMessageBox.warning(self, "保存失败", "没有当前图像可保存")
+            return
+            
+        # 如果没有设置标注文件夹，使用与原始图像相同的文件夹创建子文件夹
+        if not self.annotation_folder:
+            _, _, filename = self.image_pairs[self.current_index]
+            parent_folder = os.path.dirname(self.original_folder)
+            self.annotation_folder = os.path.join(parent_folder, "标注")
+            
+        # 确保标注文件夹存在
+        os.makedirs(self.annotation_folder, exist_ok=True)
         
+        try:
+            # 获取当前图像信息
+            _, _, filename = self.image_pairs[self.current_index]
+            
+            # 创建文件名：原始文件名_标注_时间戳.扩展名
+            base_name, ext = os.path.splitext(filename)
+            timestamp = QDateTime.currentDateTime().toString("yyyyMMdd_hhmmss")
+            
+            if annotation_text:
+                # 使用前20个字符作为文件名的一部分，移除非法字符
+                annotation_short = ''.join(c for c in annotation_text[:20] if c.isalnum() or c in ' _-')
+                annotation_short = annotation_short.replace(' ', '_')
+                new_filename = f"{base_name}_标注_{annotation_short}_{timestamp}{ext}"
+            else:
+                new_filename = f"{base_name}_标注_{timestamp}{ext}"
+            
+            output_path = os.path.join(self.annotation_folder, new_filename)
+            
+            # 保存原始图像带标注
+            if self.original_view.annotations:
+                orig_image = QImage(self.original_scene.sceneRect().size().toSize(), QImage.Format_ARGB32)
+                orig_image.fill(Qt.white)
+                painter = QPainter(orig_image)
+                self.original_scene.render(painter)
+                painter.end()
+                orig_image.save(os.path.join(self.annotation_folder, f"orig_{new_filename}"))
+                
+            # 保存翻译图像带标注
+            if self.translated_view.annotations:
+                trans_image = QImage(self.translated_scene.sceneRect().size().toSize(), QImage.Format_ARGB32)
+                trans_image.fill(Qt.white)
+                painter = QPainter(trans_image)
+                self.translated_scene.render(painter)
+                painter.end()
+                trans_image.save(output_path)
+                
+            # 如果两个视图都没有标注，给出提示
+            if not self.original_view.annotations and not self.translated_view.annotations:
+                QMessageBox.information(self, "没有标注", "当前图像没有添加任何标注")
+                return
+                
+            self.status_label.setText(f"已保存标注图像到: {output_path}")
+            print(f"已保存标注图像: {output_path}")
+                
+        except Exception as e:
+            QMessageBox.warning(self, "保存失败", f"保存标注图像时出错: {str(e)}")
+            print(f"保存标注图像时出错: {str(e)}")
+    
     def zoom_in(self):
         """放大两个视图"""
         factor = 1.2
@@ -332,6 +423,11 @@ class ImageComparisonTool(QMainWindow):
             
         self.original_folder = original_folder
         self.translated_folder = translated_folder
+        
+        # 如果没有选择标注文件夹，默认在原始图像文件夹旁边创建"标注"文件夹
+        if not self.annotation_folder:
+            parent_folder = os.path.dirname(original_folder)
+            self.annotation_folder = os.path.join(parent_folder, "标注")
         
         # 查找匹配的图像对
         self.find_image_pairs()
@@ -420,6 +516,10 @@ class ImageComparisonTool(QMainWindow):
             # 确保两个视图的场景大小一致
             self.original_view.setSceneRect(self.original_scene.sceneRect())
             self.translated_view.setSceneRect(self.translated_scene.sceneRect())
+            
+            # 清空标注列表
+            self.original_view.annotations = []
+            self.translated_view.annotations = []
             
             # 重置视图
             self.reset_views()
